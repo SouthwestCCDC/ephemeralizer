@@ -4,16 +4,20 @@ import logging
 import re
 import os.path
 
-logging = logging.getLogger(__name__)
+import truststore
+truststore.inject_into_ssl()
+
+eph_log = logging.getLogger(__name__)
 
 def get_minio_connection(remote_url, remote_access_key, remote_secret_key):
-    logging.info(f'Connecting to remote minio endpoint at {remote_url}')
+    eph_log.info(f'Connecting to remote minio endpoint at {remote_url}')
+    # TODO: Trust our key, use truststore
     return minio.Minio(remote_url, access_key=remote_access_key, secret_key=remote_secret_key)
 
 def load_defaults_from_config(config_path):
     # If the config file is not readable or doesn't exist, return an empty dictionary.
     if not os.path.exists(config_path) or not os.access(config_path, os.R_OK):
-        logging.warning(f'Config file {config_path} is not readable or does not exist')
+        eph_log.warning(f'Config file {config_path} is not readable or does not exist')
         return dict()
 
     config_schema = {
@@ -29,7 +33,7 @@ def load_defaults_from_config(config_path):
         for arg, env_var in config_schema.items():
             match = re.search(f'{env_var}="(.+)"', config)
             if match:
-                logging.info(f'Found {arg} in config file')
+                eph_log.debug(f'Found {arg} in config file')
                 default_arguments[arg] = match.group(1)
 
     return default_arguments
@@ -39,8 +43,16 @@ def load_defaults_from_config(config_path):
 @click.option('--context-path', type=click.Path(file_okay=True, dir_okay=False, readable=True), 
               default="/var/run/one-context/one_env", 
               help='Path to the OpenNebula context file to read')
-def ephemeralizer(ctx, context_path):
+@click.option('--log-level', type=click.Choice(['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']), default='INFO', help='Set the log level')
+def ephemeralizer(ctx, context_path, log_level):
     ctx.ensure_object(dict)
+    
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    handler.setFormatter(formatter)
+    eph_log.addHandler(handler)
+    eph_log.setLevel(log_level)
+
     # The order of precedence for defaults is:
     #  1. Command line arguments overrule everything
     #  2. Environment variables overrule config file
@@ -57,6 +69,32 @@ def ephemeralizer(ctx, context_path):
 
     # Next, ctx.invoked_subcommand will be called.
 
+@ephemeralizer.command('test')
+@click.option('--remote-url', required=True, help='URL of the remote minio endpoint')
+@click.option('--remote-bucket', required=True, help='Name of the remote bucket')
+@click.option('--remote-access-key', required=True, help='Access key for the remote minio endpoint')
+@click.option('--remote-secret-key', required=True, help='Secret key for the remote minio endpoint')
+def test(remote_url, remote_bucket, remote_access_key, remote_secret_key):
+    try:
+        client = get_minio_connection(remote_url, remote_access_key, remote_secret_key)
+        found = client.bucket_exists(remote_bucket)
+        eph_log.info(f'Connection to endpoint {remote_url} successful')
+        if not found:
+            eph_log.error(f'Bucket {remote_bucket} does not exist')
+            return
+    except ValueError as e:
+        # "Path in endpoint is not allowed"
+        eph_log.error(f'Error connecting to remote minio endpoint: {e}')
+        return
+    except minio.error.InvalidResponseError as e:
+        eph_log.error(f"Got an invalid response from the remote endpoint: is it correct and running minio?")
+        return
+    except Exception as e:
+        eph_log.error(f'Error connecting to remote minio endpoint: {e}')
+        return
+    
+
+
 @ephemeralizer.command('save')
 @click.pass_context
 @click.option('--remote-url', required=True, help='URL of the remote minio endpoint')
@@ -69,10 +107,10 @@ def save(ctx, remote_url, remote_bucket, remote_access_key, remote_secret_key, l
         client = get_minio_connection(remote_url, remote_access_key, remote_secret_key)
     except ValueError as e:
         # "Path in endpoint is not allowed"
-        logging.error(f'Error connecting to remote minio endpoint: {e}')
+        eph_log.error(f'Error connecting to remote minio endpoint: {e}')
         return
     except Exception as e:
-        logging.error(f'Error connecting to remote minio endpoint: {e}')
+        eph_log.error(f'Error connecting to remote minio endpoint: {e}')
         return
 
 def ephemeralize_app():

@@ -4,6 +4,7 @@ version = "0.2"
 dependencies = [
     "minio==7.2.14",
     "click==8.1.8",
+    "truststore==0.10.0",
 ]
 
 [build-system]
