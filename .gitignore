@@ -8,3 +8,5 @@ test_local/test2/6cJH89.gif
 test_local/test2/foo/419.jpeg
 test_local/test2/foo/501st-and-Chad.jpg
 CONTEXT_LOCAL.SH
+build/
+src/ephemeralizer.egg-info/
