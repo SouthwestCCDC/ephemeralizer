@@ -4,6 +4,7 @@ import logging
 import re
 import os.path
 from io import BytesIO
+from pathlib import Path
 
 # TODO: Add quiesce and unquiesce commands
 
@@ -16,6 +17,21 @@ truststore.inject_into_ssl()
 TEST_FILE = '.ephemeralizer-test'
 
 eph_log = logging.getLogger(__name__)
+
+def composed_decorators(*decs):
+    def deco(f):
+        for dec in reversed(decs):
+            f = dec(f)
+        return f
+    return deco
+
+shared_command_options = composed_decorators(
+    click.option('--remote-url', required=True, help='URL of the remote minio endpoint'),
+    click.option('--remote-bucket', required=True, help='Name of the remote bucket'),
+    click.option('--remote-prefix', required=True, help='Name of the prefix (directory) inside the bucket to use for this service'),
+    click.option('--remote-access-key', required=True, help='Access key for the remote minio endpoint'),
+    click.option('--remote-secret-key', required=True, help='Secret key for the remote minio endpoint'),
+)
 
 def get_minio_connection(remote_url, remote_access_key, remote_secret_key):
     eph_log.info(f'Connecting to remote minio endpoint at {remote_url}')
@@ -89,11 +105,7 @@ def ephemeralizer(ctx, context_path, log_level):
     # Next, ctx.invoked_subcommand will be called.
 
 @ephemeralizer.command('test')
-@click.option('--remote-url', required=True, help='URL of the remote minio endpoint')
-@click.option('--remote-bucket', required=True, help='Name of the remote bucket')
-@click.option('--remote-prefix', required=True, help='Name of the prefix (directory) inside the bucket to use for this service')
-@click.option('--remote-access-key', required=True, help='Access key for the remote minio endpoint')
-@click.option('--remote-secret-key', required=True, help='Secret key for the remote minio endpoint')
+@shared_command_options
 def test(remote_url, remote_bucket, remote_prefix, remote_access_key, remote_secret_key):
     try:
         # Connect, although lazily so this tells us nothing.
@@ -104,7 +116,7 @@ def test(remote_url, remote_bucket, remote_prefix, remote_access_key, remote_sec
         eph_log.info(f'Connection to endpoint {remote_url} successful')
         if not found:
             eph_log.error(f'Bucket {remote_bucket} does not exist')
-            return
+            exit(1)
         test_file_path = f"{remote_prefix}/{TEST_FILE}"
         # Try to write a blank file to the bucket.
         eph_log.debug(f'Writing a blank file to {remote_bucket}/{test_file_path}')
@@ -122,24 +134,76 @@ def test(remote_url, remote_bucket, remote_prefix, remote_access_key, remote_sec
         eph_log.info(f'Successfully deleted {remote_bucket}/{test_file_path}')
     except minio.error.InvalidResponseError as e:
         eph_log.error(f"Got an invalid response from the remote endpoint: is it correct and running minio?")
-        return
-    
+        exit(1)
     except Exception as e:
         eph_log.error(f'{type(e)} {e}')
-        print(dir(e))
-        print(e.with_traceback())
-        return
+        exit(1)
 
-# @ephemeralizer.command('save')
-# @click.pass_context
-# @click.option('--remote-url', required=True, help='URL of the remote minio endpoint')
-# @click.option('--remote-bucket', required=True, help='Name of the remote bucket')
-# @click.option('--remote-access-key', required=True, help='Access key for the remote minio endpoint')
-# @click.option('--remote-secret-key', required=True, help='Secret key for the remote minio endpoint')
-# @click.option('--local-path', required=True, type=click.Path(exists=True, file_okay=False, readable=True, dir_okay=True), help='Path to the local directory to be uploaded')
-# def save(ctx, remote_url, remote_bucket, remote_access_key, remote_secret_key, local_path):
-#     try:
-#         client = get_minio_connection(remote_url, remote_access_key, remote_secret_key)
+@ephemeralizer.command('load')
+@shared_command_options
+@click.option('--local-path', required=True, type=click.Path(exists=True, file_okay=False, readable=True, writable=True, dir_okay=True), help='Path to the local directory to be uploaded')
+def load(remote_url, remote_bucket, remote_prefix, remote_access_key, remote_secret_key, local_path):
+    # TODO: Should we check to see if the local directory is empty?
+    # TODO: Should we just be using mcli instead of this?
+    local_path = Path(local_path)
+
+    try:
+        client = get_minio_connection(remote_url, remote_access_key, remote_secret_key)
+        eph_log.debug(f'Attempting to find bucket {remote_bucket}')
+        found = client.bucket_exists(remote_bucket)
+        if not found:
+            eph_log.error(f'Bucket {remote_bucket} does not exist')
+            exit(1)
+        eph_log.info(f'Connection to endpoint {remote_url} successful')
+        eph_log.debug(f'Walking bucket {remote_bucket}/{remote_prefix}/*')
+        remote_objects = client.list_objects(remote_bucket, prefix=remote_prefix, recursive=True)
+        eph_log.info(f'Fetched list of objects at {remote_bucket}/{remote_prefix}/*')
+        for obj in remote_objects:
+            eph_log.debug(f'Found remote object {obj.object_name}')
+            obj_relpath_parts = Path(obj.object_name).parts[1:]
+            save_path = local_path.joinpath(*obj_relpath_parts)
+            eph_log.debug(f'Placing found object at {save_path}')
+            save_path.parent.mkdir(parents=True, exist_ok=True)
+            client.fget_object(remote_bucket, obj.object_name, str(save_path))
+            eph_log.info(f'Successfully downloaded {obj.object_name} to {save_path}')
+        eph_log.info(f'Finished downloading all objects from {remote_bucket}/{remote_prefix}')
+    except minio.error.InvalidResponseError as e:
+        eph_log.error(f"Got an invalid response from the remote endpoint: is it correct and running minio?")
+        exit(1)
+    except Exception as e:
+        eph_log.error(f'{type(e)} {e}')
+        exit(1)
+
+# TODO: Handle deleting files from the remote bucket if they don't exist locally?
+@ephemeralizer.command('save')
+@shared_command_options
+@click.option('--local-path', required=True, type=click.Path(exists=True, file_okay=False, readable=True, dir_okay=True), help='Path to the local directory to be uploaded')
+def save(remote_url, remote_bucket, remote_prefix, remote_access_key, remote_secret_key, local_path):
+    local_path = Path(local_path)
+
+    try:
+        client = get_minio_connection(remote_url, remote_access_key, remote_secret_key)
+        eph_log.debug(f'Attempting to find bucket {remote_bucket}')
+        found = client.bucket_exists(remote_bucket)
+        if not found:
+            eph_log.error(f'Bucket {remote_bucket} does not exist')
+            exit(1)
+        eph_log.info(f'Connection to endpoint {remote_url} successful')
+        eph_log.debug(f'Walking local directory {local_path}/*')
+        for root, dirs, files in os.walk(local_path):
+            for file in files:
+                local_file_path = Path(root).joinpath(file)
+                remote_file_path = f"{remote_prefix}/{local_file_path.relative_to(local_path)}"
+                eph_log.debug(f'Uploading {local_file_path} to {remote_bucket}/{remote_prefix}')
+                client.fput_object(remote_bucket, remote_file_path, str(local_file_path))
+                eph_log.info(f'Successfully uploaded {local_file_path} to {remote_bucket}/{remote_prefix}')
+        eph_log.info(f'Finished uploading all objects from {local_path} to {remote_bucket}/{remote_prefix}')
+    except minio.error.InvalidResponseError as e:
+        eph_log.error(f"Got an invalid response from the remote endpoint: is it correct and running minio?")
+        exit(1)
+    except Exception as e:
+        eph_log.error(f'{type(e)} {e}')
+        exit(1)
 
 def ephemeralize_app():
     ephemeralizer()
