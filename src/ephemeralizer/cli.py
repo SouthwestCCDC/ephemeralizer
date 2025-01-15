@@ -8,9 +8,6 @@ from pathlib import Path
 
 # TODO: Add quiesce and unquiesce commands
 
-# TODO: set a path inside the bucket as well as the bucket name, since it seems like we're
-#       moving to using a single bucket.
-
 import truststore
 truststore.inject_into_ssl()
 
