@@ -35,5 +35,5 @@ pip install .
 Use `pipx` to install this:
 
 ```
-pipx install git+ssh://git@github.com/SouthwestCCDC/ephemeralizer
+pipx install git+https://github.com/SouthwestCCDC/ephemeralizer
 ```
